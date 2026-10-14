@@ -119,7 +119,10 @@ def load_mesh_fesom2(
     # path of mesh location
     meshpath = os.path.normpath(meshpath)
     meshid   = os.path.basename(meshpath)
-    
+    if meshid =='mesh': # makes it impossible to store different meshes, so then take the folder above
+        # e.g. jack mesh (1km) is stored in '../jack/mesh' and next mesh (2km) is stored in '../next/mesh'
+        meshid = os.path.basename(os.path.dirname(meshpath))
+
     #___________________________________________________________________________
     # build path for cach to store the pickle files, either in home directory or 
     # in path given by environment variable MYPY_MESHPATH 
