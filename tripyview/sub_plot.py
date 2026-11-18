@@ -410,7 +410,7 @@ def plot_hslice(mesh                   ,
             norm_plot.append(  do_data_norm(cinfo_plot[-1], do_rescale[ii-1]) )
         else:
             norm_plot.append(  do_data_norm(cinfo_plot[-1], do_rescale) )
-        
+  
     #___________________________________________________________________________
     # --> loop over axes
     hp, hbot, hmsh, hlsm, hgrd, hstrm, hquiv, hall = list(), list(), list(), list(), list(), list(), list(), list()
@@ -1885,7 +1885,7 @@ def plot_vslice(mesh                   ,
     #___________________________________________________________________________
     # save figure based on do_save contains either None or pathname
     do_savefigure(do_save, hfig, dpi=save_dpi, save_opt=save_opt)
-    plt.show()
+    #plt.show()
     
     #___________________________________________________________________________
     list_argout=[]
@@ -4253,7 +4253,7 @@ def do_data_prepare_unstruct(mesh, tri, data_plot, do_ie2n):
         tri.mask_e_ok = isnan==False
         data_plot     = data_plot[tri.mask_e_ok]
     else:
-        tri.mask_e_ok = np.any(isnan[tri.triangles], axis=1)==False
+        tri.mask_e_ok = ~np.any(isnan[tri.triangles.ravel()].reshape(tri.triangles.shape), axis=1)
     del(isnan) 
     
     #___________________________________________________________________________

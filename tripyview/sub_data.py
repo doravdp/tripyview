@@ -25,6 +25,7 @@ def load_data_fesom2(mesh,
                      mon            = None      ,
                      day            = None      ,
                      record         = None      ,
+                     do_pdens       = False     ,
                      depth          = None      ,
                      depidx         = False     ,
                      do_tarithm     = 'mean'    ,
@@ -165,7 +166,6 @@ def load_data_fesom2(mesh,
     do_vec  = False
     do_sclrv= None # do scalar velocity compononent
     do_norm = False
-    do_pdens= False
     str_adep, str_atim = '', '' # string for arithmetic
     str_ldep, str_ltim = '', '' # string for labels
     str_lsave = ''    
@@ -292,10 +292,10 @@ def load_data_fesom2(mesh,
         vname, vname2 = aux[1], aux[2]
         del aux
         
-    elif ('sigma' in vname) or ('pdens' in vname):
-        do_pdens=True 
-        vname_tmp = vname
-        vname, vname2 = 'temp', 'salt'
+    # elif ('sigma' in vname) or ('pdens' in vname):
+        # do_pdens=True 
+        # vname_tmp = vname
+        # vname, vname2 = 'temp', 'salt'
         
     #___________________________________________________________________________
     # create path name list that needs to be loaded
@@ -707,9 +707,10 @@ def do_pathlist(year, datapath, do_filename, do_file, vname, runid):
                 all(isinstance(value, (int, np.integer)) for value in year)):
             year_in = range(year[0],year[1]+1)
             str_mtim = 'y:{}-{}'.format(str(year[0]), str(year[1]))
-        # year = [year1,year2,year3....]            
+        # year = [year1,year2,year3....]          
         else:           
             year_in = year
+            print(year_in)
             str_mtim = 'y:{}-{}'.format(str(year[0]), str(year[-1]))
         # loop over year to create filename list 
         for yr in year_in:
@@ -1501,24 +1502,47 @@ def do_vector_rotation(data, mesh, do_vec, do_vecrot, do_sclrv):
     if do_vec and do_vecrot:
         # which varaibles are in data, must be two to compute vector rotation
         vname = list(data.keys())
+        print('doing vector rotation for: ', vname)
+
+        def rotate_data_pair(u_name, v_name, lon, lat):
+            dims = data[u_name].dims
+            node_dim = next(
+                (dim for dim in ('nod2', 'node', 'elem') if dim in dims),
+                None,
+            )
+            if node_dim is None:
+                raise ValueError(
+                    'Vector data must contain a nod2, node, or elem dimension'
+                )
+            rotated_dims = (node_dim,) + tuple(
+                dim for dim in dims if dim != node_dim
+            )
+            u_rot = data[u_name].transpose(*rotated_dims).data
+            v_rot = data[v_name].transpose(*rotated_dims).data
+            u_geo, v_geo = vec_r2g(
+                mesh.abg, lon, lat, u_rot, v_rot, gridis='geo'
+            )
+            data[u_name].data = xr.DataArray(
+                u_geo, dims=rotated_dims
+            ).transpose(*dims).data
+            data[v_name].data = xr.DataArray(
+                v_geo, dims=rotated_dims
+            ).transpose(*dims).data
         
         # vector data are on vertices 
         if ('nod2' in data[vname[0]].dims) or ('node' in data[vname[0]].dims):
             print(' > do nod2 vector rotation')
-            data[vname[0] ].data,\
-            data[vname[1]].data = vec_r2g(mesh.abg, mesh.n_x, mesh.n_y, 
-                                        data[vname[0]].data, data[vname[1]].data, 
-                                        gridis='geo' )
+            rotate_data_pair(vname[0], vname[1], mesh.n_x, mesh.n_y)
         
         # vector data are on elements
         if ('elem' in data[vname[0]].dims):
             print(' > do elem vector rotation')
-            data[vname[0] ].data,\
-            data[vname[1]].data = vec_r2g(mesh.abg, 
-                                        mesh.n_x[mesh.e_i].sum(axis=1)/3, 
-                                        mesh.n_y[mesh.e_i].sum(axis=1)/3, 
-                                        data[vname[0]].data, data[vname[1]].data, 
-                                        gridis='geo' )  
+            rotate_data_pair(
+                vname[0],
+                vname[1],
+                mesh.n_x[mesh.e_i].sum(axis=1)/3,
+                mesh.n_y[mesh.e_i].sum(axis=1)/3,
+            )
         
         # in case only a scalar vector component is needed, rotation might still 
         # need to be done. After rotation the other vector component can be dropped

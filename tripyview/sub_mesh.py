@@ -2089,11 +2089,16 @@ def vec_r2g(abg, lon, lat, urot, vrot, gridis='geo', do_info=False ):
     """
     #___________________________________________________________________________
     # create grid coorinates for geo and rotated frame
+    lon = np.asarray(lon, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
+    urot = np.asarray(urot, dtype=np.float64)
+    vrot = np.asarray(vrot, dtype=np.float64)
+    
     if any(x in gridis for x in ['geo','g','geographical']): 
         rlon, rlat = grid_g2r(abg, lon, lat)        
     elif any(x in gridis for x in ['rot','r','rotated']):     
         rlon, rlat = lon, lat 
-        lon,  lat  = grid_g2r(abg, rlon, rlat)
+        lon,  lat  = grid_r2g(abg, rlon, rlat)
     else:
         raise ValueError("The option gridis={} in vec_r2g is not supported.\n (only: 'geo','g','geographical', 'rot','r','rotated') ".format(str(gridis)))
     
@@ -2130,41 +2135,33 @@ def vec_r2g(abg, lon, lat, urot, vrot, gridis='geo', do_info=False ):
         ugeo= vxg*-np.sin(lon) + vyg*np.cos(lon)
         
     #___________________________________________________________________________
-    # rotation of two dimensional vector data    
-    elif vrot.ndim==2 or urot.ndim==2: 
-        if do_info: print('     > 2D rotation')
-        nd1,nd2=urot.shape
-        ugeo, vgeo = urot.copy(), vrot.copy()
-        if do_info: print('nlev:{:d}'.format(nd2))
-        for nd2i in range(0,nd2):
-            #___________________________________________________________________
-            if do_info: 
-                print('{:02d}|'.format(nd2i), end='')
-                if np.mod(nd2i+1,10)==0: print('')
-            
-            #___________________________________________________________________
-            t1=clock.time()
-            aux_urot, aux_vrot = urot[:,nd2i], vrot[:,nd2i]
-            
-            #___________________________________________________________________
-            # compute vector in rotated cartesian coordinates
-            t1=clock.time()
-            vxr = -aux_vrot*np.sin(rlat)*np.cos(rlon) - aux_urot*np.sin(rlon)
-            vyr = -aux_vrot*np.sin(rlat)*np.sin(rlon) + aux_urot*np.cos(rlon)
-            vzr =  aux_vrot*np.cos(rlat)
-            
-            #___________________________________________________________________
-            # compute vector in geo cartesian coordinates
-            t1=clock.time()
-            vxg = rmat[0,0]*vxr + rmat[0,1]*vyr + rmat[0,2]*vzr
-            vyg = rmat[1,0]*vxr + rmat[1,1]*vyr + rmat[1,2]*vzr
-            vzg = rmat[2,0]*vxr + rmat[2,1]*vyr + rmat[2,2]*vzr
-            
-            #___________________________________________________________________
-            # compute vector in geo coordinates 
-            t1=clock.time()
-            vgeo[:,nd2i]= vxg*-np.sin(lat)*np.cos(lon) - vyg* np.sin(lat)*np.sin(lon) + vzg* np.cos(lat)
-            ugeo[:,nd2i]= vxg*-np.sin(lon) + vyg*np.cos(lon)
+    # rotation of vector data with one node/element axis and any number of
+    # additional dimensions (for example time and depth).
+    elif vrot.ndim >= 2 and urot.ndim >= 2:
+        if do_info: print(' > multidimensional rotation')
+        node_shape = (len(lon),) + (1,) * (urot.ndim - 1)
+        lon = lon.reshape(node_shape)
+        lat = lat.reshape(node_shape)
+        rlon = rlon.reshape(node_shape)
+        rlat = rlat.reshape(node_shape)
+
+        # compute vector in rotated cartesian coordinates
+        vxr = -vrot*np.sin(rlat)*np.cos(rlon) - urot*np.sin(rlon)
+        vyr = -vrot*np.sin(rlat)*np.sin(rlon) + urot*np.cos(rlon)
+        vzr = vrot*np.cos(rlat)
+
+        # compute vector in geo cartesian coordinates
+        vxg = rmat[0,0]*vxr + rmat[0,1]*vyr + rmat[0,2]*vzr
+        vyg = rmat[1,0]*vxr + rmat[1,1]*vyr + rmat[1,2]*vzr
+        vzg = rmat[2,0]*vxr + rmat[2,1]*vyr + rmat[2,2]*vzr
+
+        # compute vector in geo coordinates
+        vgeo = (
+            vxg*-np.sin(lat)*np.cos(lon)
+            - vyg*np.sin(lat)*np.sin(lon)
+            + vzg*np.cos(lat)
+        )
+        ugeo = vxg*-np.sin(lon) + vyg*np.cos(lon)
             
     #___________________________________________________________________________    
     else: raise ValueError('This number of dimensions is in moment not supported for vector rotation')    
