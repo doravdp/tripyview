@@ -9,6 +9,7 @@ import json
 import geopandas as gpd
 import matplotlib.pylab as plt
 from   matplotlib.ticker import MultipleLocator, AutoMinorLocator, ScalarFormatter
+import gc
 
 from   .sub_mesh           import * 
 from   .sub_data           import *
@@ -25,10 +26,14 @@ def load_index_fesom2(mesh                  ,
                       boxname       = None  , 
                       do_harithm    ='wmean', 
                       do_zarithm    = None  ,
+                      do_idxin_out  = False , 
+                      do_idxin_in   = None , 
                       do_checkbasin = False , 
                       do_compute    = False , 
                       do_load       = True  , 
                       do_persist    = False ,
+                      do_onecompute = True  ,
+                      client        = None  ,
                       ):
     """
     --> compute index over region from 2d and 3d vertice data
@@ -72,11 +77,32 @@ def load_index_fesom2(mesh                  ,
                         
         :do_persist:    bool (default=False), do xarray dataset persist() at the end
                         data = data.persist(), keeps the dataset as dask array, keeps
-                        the chunking    
-                      
+                        the chunking
+
+        :do_onecompute: bool (default=True), apply do_compute/do_load/do_persist
+                        once for all regions in box_list together instead of
+                        region by region. With lazy input data, the region by
+                        region way re-reads the full data from disk for every
+                        region, together every data chunk is read only once and
+                        feeds all regional reductions. Same reduction per region,
+                        results agree within the float32 run-to-run noise of
+                        the weighted mean (~1e-5, see BUGREPORT #47), memory
+                        need is about the same, since only the small regional
+                        indices are kept.
+
+                        ::
+
+                            region by region:  disk --> data --> region 1   (read 1)
+                                               disk --> data --> region 2   (read 2)
+                                               ...
+                            do_onecompute   :  disk --> data -+-> region 1  (read 1)
+                                                              +-> region 2
+                                                              +-> ...
+
         :do_info:       bool (defalt=False), print variable info at the end 
                        
-                    
+        :client:        dask client object (default=None)
+        
     Returns:
     
     
@@ -92,44 +118,92 @@ def load_index_fesom2(mesh                  ,
     cnt         = 0
     
     #___________________________________________________________________________
-    # loop over box_list
-    for box in box_list:
+    vname = list(data.keys())[0]
+    dimn_v = None
+    dimn_h, dimn_v = 'dum', 'dum'
+    if   ('nod2' in data.dims): dimn_h, do_elem = 'nod2', False
+    elif ('elem' in data.dims): dimn_h, do_elem = 'elem', False
+    if   'nz'  in list(data[vname].dims): 
+        dimn_v  = 'nz'    
+    elif 'nz1' in list(data[vname].dims) or 'nz_1' in list(data[vname].dims): 
+        dimn_v  = 'nz1'
         
+    #___________________________________________________________________________
+    # 1st pass: convert every box into its name + geometry and build its region
+    # mask lazily (nothing computed yet)
+    box_info, idxin_lazy = list(), list()
+    for bi, box in enumerate(box_list):
+        #_______________________________________________________________________
         if not isinstance(box, shp.Reader):
-            if len(box)==2: boxname, box = box[1], box[0]
+            if   len(box)==2: boxname, box = box[1], box[0]
+            elif len(box)==4 and boxname==None: boxname = '[{:03.2f}...{:03.2f}°E, {:03.2f}...{:03.2f}°N]'.format(box[0],box[1],box[2],box[3])
             if box is None or box=='global': boxname='global'
         else:     
+            # if we do the box polygon selection in paralel, i cant give into the 
+            # box selection routine the Read shapefile handle since its not pickable
+            # therfore i need to extract the shapefile polygon points before throwing it into 
+            # the do_boxmask_dask routine 
             boxname = os.path.basename(box.shapeName).replace('_',' ')  
-           
+            shape_data = [shape.points for shape in box.shapes()]  # Extract raw data
+            box = MultiPolygon([Polygon(shape) for shape in shape_data])
+        box_info.append((boxname, box))
+        
         #_______________________________________________________________________
-        # compute  mask index
-        if   'nod2' in data.dims: 
-            idx_IN=xr.DataArray(do_boxmask(mesh, box, do_elem=False), dims='nod2')
-            # --> seems to be not allowed anymore in newer version of xarray + dask
-            #     indexing array cant be chunked anymore
-            #if any(data.chunks.values()): idx_IN = idx_IN.chunk({'nod2':data.chunksizes['nod2']})
-            
-        elif 'elem' in data.dims: 
-            idx_IN=xr.DataArray(do_boxmask(mesh, box, do_elem=True), dims='elem')
-            # --> seems to be not allowed anymore in newer version of xarray + dask
-            #     indexing array cant be chunked anymore
-            #if any(data.chunks.values()): idx_IN = idx_IN.chunk({'elem':data.chunksizes['elem']})
-            
+        # lazy mask index to select index region, one map_blocks task per chunk
+        if do_idxin_in is None and box != 'global':
+            #idxin=xr.DataArray(do_boxmask(mesh, box, do_elem=do_elem), dims=dimn_h)
+            idxin_lazy.append(da.map_blocks(do_boxmask_dask,
+                                            data['lon'].data,
+                                            data['lat'].data,
+                                            data['ispbnd'].data,
+                                            box,
+                                            dtype=bool))
+        else:
+            idxin_lazy.append(None)
+    
+    #___________________________________________________________________________
+    # compute the masks of all regions in ONE dask.compute: their tasks are
+    # independent and are spread over the workers, instead of one region
+    # after the other with a scheduler round trip each
+    #
+    #   before:  [mask 1] -> [mask 2] -> ... -> [mask n]   one .compute() each
+    #   now   :  [mask 1]
+    #            [mask 2]   all in one dask.compute()
+    #            ...
+    #            [mask n]
+    import dask
+    idxin_all = [None]*len(box_list)
+    idx_todo  = [ii for ii, idx in enumerate(idxin_lazy) if idx is not None]
+    if len(idx_todo)>0:
+        idx_res = dask.compute(*[idxin_lazy[ii] for ii in idx_todo])
+        for ii, idxin in zip(idx_todo, idx_res):
+            if isinstance(idxin, da.Array): idxin = idxin.compute() # ---> we can not index whit a dask array 
+            idxin_all[ii] = idxin
+    del(idxin_lazy)
+    
+    #___________________________________________________________________________
+    # 2nd pass: loop over the regions, the mask is only looked up
+    for bi, (boxname, box) in enumerate(box_info):
+        #_______________________________________________________________________
+        # mask index to select index region (None = global)
+        if do_idxin_in is None: idxin = idxin_all[bi]
+        else                  : idxin = do_idxin_in[bi]
+        
         #_______________________________________________________________________
         # check basin selection
-        if do_checkbasin:
+        if do_checkbasin and idxin is not None:
             from matplotlib.tri import Triangulation
             tri = Triangulation(np.hstack((mesh.n_x,mesh.n_xa)), np.hstack((mesh.n_y,mesh.n_ya)), np.vstack((mesh.e_i[mesh.e_pbnd_0,:],mesh.e_ia)))
             plt.figure()
             ax = plt.gca()
             plt.triplot(tri, color='k')
-            if   'nod2' in data.dims: 
-                plt.plot(mesh.n_x[idx_IN], mesh.n_y[idx_IN], '*r', linestyle='None', markersize=1)
+            if  not do_elem:
+                plt.plot(mesh.n_x[idxin], mesh.n_y[idxin], '*r', linestyle='None', markersize=1)
             else: 
-                plt.plot(mesh.n_x[tri.triangles[idx_IN,:]].sum(axis=1)/3.0, mesh.n_y[tri.triangles[idx_IN,:]].sum(axis=1)/3.0, '*r', linestyle='None', markersize=1)
+                plt.plot(mesh.n_x[tri.triangles[idxin,:]].sum(axis=1)/3.0, mesh.n_y[tri.triangles[idxin,:]].sum(axis=1)/3.0, '*r', linestyle='None', markersize=1)
             plt.title('Basin selection')
             plt.show()
-                
+        
         #_______________________________________________________________________
         # selected points in xarray dataset object and  average over selected 
         # points
@@ -138,58 +212,56 @@ def load_index_fesom2(mesh                  ,
         elif 'elem' in data.dims: dim_name.append('elem')    
         if   'nz'   in data.dims: dim_name.append('nz')
         elif 'nz1'  in data.dims: dim_name.append('nz1')      
+        
+        #_______________________________________________________________________
+        # select index region from data
+        if box != 'global': 
+            index = data.sel({dimn_h:idxin})
+            #index = data.sel({dimn_h:idxin}).persist()
+        else              : 
+            index = data    
+            #index = data.persist()
+        
+        #_______________________________________________________________________
+        # do volume averaged mean (apply horiz. and vertical)
+        if   do_harithm=='wmean' and do_zarithm=='wmean':
+            index = index.weighted(index['w_A']*index['w_z']).mean(dim=dim_name, keep_attrs=True, skipna=True)
                 
-        #_______________________________________________________________________
-        # do volume averaged mean
-        if do_harithm=='wmean' and do_zarithm=='wmean':
-            if   'nod2' in data.dims:
-                index   = data.sel(nod2=idx_IN)
-                weights = index['w_A']*index['w_z']
-                index   = index.drop_vars(['w_A', 'w_z'])
-                weights = weights/weights.sum(dim=dim_name, skipna=True)
-                index   = index*weights.astype('float32', copy=False )
-                index   = index.sum(dim=dim_name, keep_attrs=True, skipna=True)  
-            elif 'elem' in data.dims:    
-                STOP
-        
-        #_______________________________________________________________________
-        # do volume integral
+        # do volume integraln  (apply horiz. and vertical)
         elif do_harithm=='wint' and do_zarithm=='wint':
-            if   'nod2' in data.dims:
-                index   = data.sel(nod2=idx_IN)
-                weights = index['w_A']*index['w_z']
-                index   = index.drop_vars(['w_A', 'w_z'])
-                index   = index*weights.astype('float32', copy=False )
-                index   = index.sum(dim=dim_name, keep_attrs=True, skipna=True)  
-            elif 'elem' in data.dims:    
-                STOP  
-        
-        #_______________________________________________________________________
+            index = index.weighted(index['w_A']*index['w_z']).sum(dim=dim_name, keep_attrs=True, skipna=True)
+
         # do horizontal/ vertical metrix that can be idependent from each other
         else:    
-            #___________________________________________________________________
-            if   'nod2' in data.dims:
-                index = do_horiz_arithmetic(data.sel(nod2=idx_IN), do_harithm, 'nod2')
-            elif 'elem' in data.dims:    
-                index = do_horiz_arithmetic(data.sel(elem=idx_IN), do_harithm, 'elem')
+            # only horizontal arithmetic 
+            if   dimn_h in ['nod2', 'elem'] and do_harithm is not None:
+                index = do_horiz_arithmetic(index, do_harithm, dimn_h)
                 
-            #___________________________________________________________________
-            if   'nz1' in data.dims and do_harithm is not None:
-                index = do_depth_arithmetic(index, do_zarithm, 'nz1')
-            elif 'nz'  in data.dims and do_harithm is not None:        
-                index = do_depth_arithmetic(index, do_zarithm, 'nz')
+            # only vertical arithmetic 
+            if   dimn_v in ['nz', 'nz1','nz_1', 'ncat', 'ndens'] and do_zarithm is not None:
+                index = do_depth_arithmetic(index, do_zarithm, dimn_v)
                     
         index_list.append(index)
-        idxin_list.append(idx_IN)
-        del(index)
+        idxin_list.append(idxin)
         
         #_______________________________________________________________________
-        warnings.filterwarnings("ignore", category=UserWarning, message="Sending large graph of size")
-        warnings.filterwarnings("ignore", category=UserWarning, message="Large object of size")
-        if do_compute: index_list[cnt] = index_list[cnt].compute()
-        if do_load   : index_list[cnt] = index_list[cnt].load()
-        if do_persist: index_list[cnt] = index_list[cnt].persist()
-        warnings.resetwarnings()
+        # with do_onecompute the regions stay lazy here and are evaluated
+        # together after the loop
+        if not do_onecompute:
+            warnings.filterwarnings("ignore", category=UserWarning, message="Sending large graph of size")
+            warnings.filterwarnings("ignore", category=UserWarning, message="Large object of size")
+            if   do_compute: index_list[cnt] = index_list[cnt].compute()
+            elif do_load   : index_list[cnt] = index_list[cnt].load()
+            elif do_persist: index_list[cnt] = index_list[cnt].persist()
+            if any([do_compute, do_load, do_persist]): index.close()
+            del(index, idxin)
+            gc.collect()
+
+            # additionally rebalancing the  memory load of workers
+            if client is not None: client.rebalance()
+            warnings.resetwarnings()
+        else:
+            del(index, idxin)
             
         #_______________________________________________________________________
         # set additional attributes
@@ -211,12 +283,25 @@ def load_index_fesom2(mesh                  ,
             
         index_list[cnt].attrs['proj'] = proj    
         
-        
         #_______________________________________________________________________
         cnt = cnt + 1
-        
+
     #___________________________________________________________________________
-    return(index_list)
+    # evaluate all regions in one graph, so every data chunk is read only once
+    # and feeds all regional reductions (see do_onecompute)
+    if do_onecompute and any([do_compute, do_load, do_persist]):
+        import dask
+        warnings.filterwarnings("ignore", category=UserWarning, message="Sending large graph of size")
+        warnings.filterwarnings("ignore", category=UserWarning, message="Large object of size")
+        if do_compute or do_load: index_list = list(dask.compute(*index_list))
+        else                    : index_list = list(dask.persist(*index_list))
+        gc.collect()
+        if client is not None: client.rebalance()
+        warnings.resetwarnings()
+
+    #___________________________________________________________________________
+    if do_idxin_out: return(index_list, idxin_list)
+    else           : return(index_list)
 
 
     
@@ -307,12 +392,13 @@ def plot_index_region(mesh, idx_IN, box_list, which='hard'):
             if   isinstance(box, Polygon): plt.plot(*box.exterior.xy,color='k', linewidth=1.0)
                 
             elif isinstance(box, MultiPolygon):
-                for p in box: plt.plot(*p.exterior.xy,color='k', linewidth=1.0)
-        
+                for p in box.geoms: plt.plot(*p.exterior.xy,color='k', linewidth=1.0)
+
         elif (isinstance(box, shp.Reader)):
-            for shape in box.shapes(): 
-                p      = Polygon(shape.points)
-                plt.plot(*p.exterior.xy,color='k', linewidth=1.0)
+            for shp_shape in box.shapes():
+                geom = shp_shape_to_geom(shp_shape)
+                for p in getattr(geom, 'geoms', [geom]):
+                    plt.plot(*p.exterior.xy,color='k', linewidth=1.0)
         # otherwise
         else:
             raise ValueError('the given box information to compute the index has no valid format')
