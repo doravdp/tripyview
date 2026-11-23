@@ -2365,11 +2365,11 @@ def dask_vec_r2g(abg, lon, lat, urot, vrot, gridis='geo', do_info=False):
 
     ## Rechunk so that the last axis (nodes) is a single chunk of length npts
     ## and we only split along time/depth axes
-    #chunks = list(u_da.chunks)
+    chunks = list(u_da.chunks)
     ## Replace last-dim chunks with a single chunk spanning all nodes
-    #chunks[-1] = (npts,)
-    #u_da = u_da.rechunk(chunks)
-    #v_da = v_da.rechunk(chunks)
+    chunks[-1] = (npts,)
+    u_da = u_da.rechunk(chunks)
+    v_da = v_da.rechunk(chunks)
 
     if do_info:
         print("vec_r2g_dask:")

@@ -19,6 +19,7 @@ import cftime
 import netCDF4 as nc
 #import seawater as sw
 import gsw as gsw
+import re
 
 import dask.array as da
 from   dask.array import broadcast_arrays
@@ -72,7 +73,7 @@ def load_data_fesom2(mesh,
                      do_showtime    = False     ,
                      do_info        = True      ,
                      client         = None      , 
-                     engine         = 'h5netcdf', #'netcdf4' , # 'h5netcdf'
+                     engine         = 'netcdf4', #'h5netcdf', #'netcdf4' , # 'h5netcdf'
                      diagpath       = None      ,
                      do_fastread    = True      ,
                      **kwargs):
@@ -403,7 +404,7 @@ def load_data_fesom2(mesh,
     # objects, continuing using cftime.datetime objects instead, reason: dates out 
     # of range dtype = _decode_cf_datetime_dtype(data, u
     use_cftime = False
-    if year is not None and np.max(np.atleast_1d(year))>2262: use_cftime=True
+    if year is not None and isinstance(year, int) and np.max(np.atleast_1d(year))>2262: use_cftime=True
     if (do_cftime): use_cftime=True
 
     # FESOM2 writes time:calendar (e.g. '365_day' for runs without leap years,
