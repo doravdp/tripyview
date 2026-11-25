@@ -2122,7 +2122,9 @@ def do_horiz_arithmetic(data, do_harithm, dim_name):
         elif do_harithm=='wmean':
             # this solution needs way less RAM and scales better with dask
             data_hmean = data.weighted(data['w_A']).mean(dim=dim_name, keep_attrs=True, skipna=True)
-            
+
+        elif do_harithm=='wstd':
+            data_hmean = data.weighted(data['w_A']).std(dim=dim_name, keep_attrs=True, skipna=True)
         elif do_harithm=='none':
             return(data)
         

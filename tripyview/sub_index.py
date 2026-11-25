@@ -26,6 +26,7 @@ def load_index_fesom2(mesh                  ,
                       boxname       = None  , 
                       do_harithm    ='wmean', 
                       do_zarithm    = None  ,
+                      do_CI         = False,
                       do_idxin_out  = False , 
                       do_idxin_in   = None , 
                       do_checkbasin = False , 
@@ -64,6 +65,9 @@ def load_index_fesom2(mesh                  ,
                         - 'wmean' ... depth weighted mean 
                         - 'wint'  ... depth weighted integral
                     
+        :do_CI:         bool, (default=True) compute confidence interval of the mean
+                        --> then: also calculate 'wstd'
+
         :do_checkbasin: bool, (default=False) additional plot with selected region/
                         basin information
         
@@ -115,6 +119,7 @@ def load_index_fesom2(mesh                  ,
     # str_anod    = ''
     index_list  = []
     idxin_list  = []
+    std_list    = []
     cnt         = 0
     
     #___________________________________________________________________________
@@ -234,8 +239,12 @@ def load_index_fesom2(mesh                  ,
         # do horizontal/ vertical metrix that can be idependent from each other
         else:    
             # only horizontal arithmetic 
-            if   dimn_h in ['nod2', 'elem'] and do_harithm is not None:
-                index = do_horiz_arithmetic(index, do_harithm, dimn_h)
+            if dimn_h in ['nod2', 'elem'] and do_harithm is not None:
+                index2 = index
+                index = do_horiz_arithmetic(index2, do_harithm, dimn_h)
+                if do_CI:
+                    std = do_horiz_arithmetic(index2, 'wstd', dimn_h)
+                    std_list.append(std)
                 
             # only vertical arithmetic 
             if   dimn_v in ['nz', 'nz1','nz_1', 'ncat', 'ndens'] and do_zarithm is not None:
@@ -301,6 +310,7 @@ def load_index_fesom2(mesh                  ,
 
     #___________________________________________________________________________
     if do_idxin_out: return(index_list, idxin_list)
+    if do_CI       : return(index_list, std_list)
     else           : return(index_list)
 
 
